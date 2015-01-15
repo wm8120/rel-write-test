@@ -1,0 +1,10 @@
+*.cmd
+.tmp_versions/
+*.ko
+Module.symvers
+mmc_test.mod.c
+modules.order
+proc.dump
+proc.dump2
+sys.dump
+sys.dump2

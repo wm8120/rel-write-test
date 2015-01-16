@@ -2355,6 +2355,54 @@ static int mmc_test_hw_reset(struct mmc_test_card *test)
 	return RESULT_UNSUP_HOST;
 }
 
+static int mmc_relw_norm_read(struct mmc_test_card *test)
+{
+	int i, ret;
+        unsigned int size;
+        unsigned long flags;
+
+        //read from sector
+    	memset(test->scratch, 0, BUFFER_SIZE);
+
+        struct scatterlist sg; 
+
+        sg_init_one(&sg, test->scratch, 512);
+
+	ret = mmc_test_set_blksize(test, 512);
+	if (ret)
+		return ret;
+
+        unsigned dev_addr = 1397346UL;
+
+	if (!mmc_card_blockaddr(test->card)) {
+            printk(KERN_ALERT "Not Block addressing\n");
+            goto out;
+        } else {
+            printk(KERN_ALERT "Block addressing\n");
+        }
+
+	ret = mmc_test_simple_transfer(test, &sg, 1, dev_addr,
+		1, 512, 0);
+	if (ret)
+		return ret;
+        
+        //verify read
+        local_irq_save(flags);
+        sg_copy_to_buffer(&sg, 1, test->scratch, 512);
+        local_irq_restore(flags);
+
+        printk(KERN_ALERT "%s", (char *)test->scratch);
+   out: 
+        return 0;
+}
+
+static const struct mmc_test_case mmc_relw_test_cases[] = {
+        {
+                .name = "Normal read (no power interrupt)",
+                .run = mmc_relw_norm_read,
+        }
+};
+
 static const struct mmc_test_case mmc_test_cases[] = {
 	{
 		.name = "Basic write (no data verification)",
@@ -2688,84 +2736,67 @@ static DEFINE_MUTEX(mmc_test_lock);
 
 static LIST_HEAD(mmc_test_result);
 
-static void mmc_normal_write(struct mmc_test_card *test)
+static void mmc_relw_test_run(struct mmc_test_card *test, int testcase)
 {
 	int i, ret;
-        unsigned int size;
-        unsigned long flags;
 
 	pr_info("%s: Starting tests of card %s...\n",
 		mmc_hostname(test->card->host), mmc_card_id(test->card));
 
 	mmc_claim_host(test->card->host);
 
-        /* normal write */
-	struct mmc_test_general_result *gr;
+	for (i = 0;i < ARRAY_SIZE(mmc_relw_test_cases);i++) {
 
-        //prepare
+		if (testcase && ((i + 1) != testcase))
+			continue;
 
-	//memset(test->buffer, 0xDF, 512);
+		pr_info("%s: Test case %d. %s...\n",
+			mmc_hostname(test->card->host), i + 1,
+			mmc_test_cases[i].name);
 
-	////for (i = 0;i < BUFFER_SIZE / 512;i++) {
-	//	ret = mmc_test_buffer_transfer(test, test->buffer, 1, 512, 1);
-	//	if (ret)
-	//		return ret;
-	//}
-        //run
+		if (mmc_relw_test_cases[i].prepare) {
+			ret = mmc_relw_test_cases[i].prepare(test);
+			if (ret) {
+				pr_info("%s: Result: Prepare "
+					"stage failed! (%d)\n",
+					mmc_hostname(test->card->host),
+					ret);
+				continue;
+			}
+		}
 
-        //read from sector
-    	memset(test->scratch, 0, BUFFER_SIZE);
+		ret = mmc_relw_test_cases[i].run(test);
+		switch (ret) {
+		case RESULT_OK:
+			pr_info("%s: Result: OK\n",
+				mmc_hostname(test->card->host));
+			break;
+		case RESULT_FAIL:
+			pr_info("%s: Result: FAILED\n",
+				mmc_hostname(test->card->host));
+			break;
+		case RESULT_UNSUP_HOST:
+			pr_info("%s: Result: UNSUPPORTED "
+				"(by host)\n",
+				mmc_hostname(test->card->host));
+			break;
+		case RESULT_UNSUP_CARD:
+			pr_info("%s: Result: UNSUPPORTED "
+				"(by card)\n",
+				mmc_hostname(test->card->host));
+			break;
+		default:
+			pr_info("%s: Result: ERROR (%d)\n",
+				mmc_hostname(test->card->host), ret);
+		}
 
-        struct scatterlist sg; 
+	}
 
-        sg_init_one(&sg, test->scratch, 512);
-
-	//local_irq_save(flags);
-	//sg_copy_from_buffer(sg, 1, test->scratch, BUFFER_SIZE);
-	//local_irq_restore(flags);
-
-	ret = mmc_test_set_blksize(test, 512);
-	if (ret)
-		return ret;
-
-        unsigned dev_addr = 1397346UL;
-
-	if (!mmc_card_blockaddr(test->card)) {
-            printk(KERN_ALERT "Not Block addressing\n");
-            goto out;
-        } else {
-            printk(KERN_ALERT "Block addressing\n");
-        }
-
-	ret = mmc_test_simple_transfer(test, &sg, 1, dev_addr,
-		1, 512, 0);
-	if (ret)
-		return ret;
-        
-        //verify read
-        local_irq_save(flags);
-        sg_copy_to_buffer(&sg, 1, test->scratch, 512);
-        local_irq_restore(flags);
-
-        printk(KERN_ALERT "%s", (char *)test->scratch);
-    
-        //cleanup
-	//size = PAGE_SIZE * 2;
-	//size = min(size, test->card->host->max_req_size);
-	//size = min(size, test->card->host->max_seg_size);
-	//size = min(size, test->card->host->max_blk_count * 512);
-
-        //printk(KERN_ALERT "max_req_size is %lu\n", test->card->host->max_req_size);
-        //printk(KERN_ALERT "max_seg_size is %lu\n", test->card->host->max_seg_size);
-        //printk(KERN_ALERT "max_blk_count is %lu\n", test->card->host->max_blk_count);
-        //printk(KERN_ALERT "transfer size is %lu\n", size);
-
-        // release host
-out:
 	mmc_release_host(test->card->host);
 
 	pr_info("%s: Tests completed.\n",
 		mmc_hostname(test->card->host));
+
 }
 
 static void mmc_test_run(struct mmc_test_card *test, int testcase)
@@ -2923,58 +2954,6 @@ static int mtf_test_open(struct inode *inode, struct file *file)
 	return single_open(file, mtf_test_show, inode->i_private);
 }
 
-static ssize_t reliable_write_test(struct file *file, const char __user *buf,
-	size_t count, loff_t *pos)
-{
-	struct seq_file *sf = (struct seq_file *)file->private_data;
-	struct mmc_card *card = (struct mmc_card *)sf->private;
-	struct mmc_test_card *test;
-	long testcase;
-	int ret;
-
-	ret = kstrtol_from_user(buf, count, 10, &testcase);
-        printk(KERN_ALERT "testcase is %d\n", testcase);
-	if (ret)
-		return ret;
-
-	test = kzalloc(sizeof(struct mmc_test_card), GFP_KERNEL);
-	if (!test)
-		return -ENOMEM;
-
-	/*
-	 * Remove all test cases associated with given card. Thus we have only
-	 * actual data of the last run.
-	 */
-	mmc_test_free_result(card);
-
-	test->card = card;
-
-	test->buffer = kzalloc(BUFFER_SIZE, GFP_KERNEL);
-#ifdef CONFIG_HIGHMEM
-	test->highmem = alloc_pages(GFP_KERNEL | __GFP_HIGHMEM, BUFFER_ORDER);
-#endif
-
-#ifdef CONFIG_HIGHMEM
-	if (test->buffer && test->highmem) {
-#else
-	if (test->buffer) {
-#endif
-		mutex_lock(&mmc_test_lock);
-            printk(KERN_ALERT "reliable write start here!\n");
-                mmc_normal_write(test);
-		mutex_unlock(&mmc_test_lock);
-	}
-
-#ifdef CONFIG_HIGHMEM
-	__free_pages(test->highmem, BUFFER_ORDER);
-#endif
-	kfree(test->buffer);
-	kfree(test);
-
-            printk(KERN_ALERT "reliable write end here!\n");
-        return count;
-}
-
 static ssize_t mtf_test_write(struct file *file, const char __user *buf,
 	size_t count, loff_t *pos)
 {
@@ -3011,7 +2990,7 @@ static ssize_t mtf_test_write(struct file *file, const char __user *buf,
 	if (test->buffer) {
 #endif
 		mutex_lock(&mmc_test_lock);
-		mmc_test_run(test, testcase);
+		mmc_relw_test_run(test, testcase);
 		mutex_unlock(&mmc_test_lock);
 	}
 
@@ -3027,7 +3006,7 @@ static ssize_t mtf_test_write(struct file *file, const char __user *buf,
 static const struct file_operations mmc_test_fops_test = {
 	.open		= mtf_test_open,
 	.read		= seq_read,
-	.write		= reliable_write_test,
+	.write		= mtf_test_write,
 	.llseek		= seq_lseek,
 	.release	= single_release,
 };

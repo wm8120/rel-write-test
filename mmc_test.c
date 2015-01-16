@@ -2688,6 +2688,86 @@ static DEFINE_MUTEX(mmc_test_lock);
 
 static LIST_HEAD(mmc_test_result);
 
+static void mmc_normal_write(struct mmc_test_card *test)
+{
+	int i, ret;
+        unsigned int size;
+        unsigned long flags;
+
+	pr_info("%s: Starting tests of card %s...\n",
+		mmc_hostname(test->card->host), mmc_card_id(test->card));
+
+	mmc_claim_host(test->card->host);
+
+        /* normal write */
+	struct mmc_test_general_result *gr;
+
+        //prepare
+
+	//memset(test->buffer, 0xDF, 512);
+
+	////for (i = 0;i < BUFFER_SIZE / 512;i++) {
+	//	ret = mmc_test_buffer_transfer(test, test->buffer, 1, 512, 1);
+	//	if (ret)
+	//		return ret;
+	//}
+        //run
+
+        //read from sector
+    	memset(test->scratch, 0, BUFFER_SIZE);
+
+        struct scatterlist sg; 
+
+        sg_init_one(&sg, test->scratch, 512);
+
+	//local_irq_save(flags);
+	//sg_copy_from_buffer(sg, 1, test->scratch, BUFFER_SIZE);
+	//local_irq_restore(flags);
+
+	ret = mmc_test_set_blksize(test, 512);
+	if (ret)
+		return ret;
+
+        unsigned dev_addr = 1397346UL;
+
+	if (!mmc_card_blockaddr(test->card)) {
+            printk(KERN_ALERT "Not Block addressing\n");
+            goto out;
+        } else {
+            printk(KERN_ALERT "Block addressing\n");
+        }
+
+	ret = mmc_test_simple_transfer(test, &sg, 1, dev_addr,
+		1, 512, 0);
+	if (ret)
+		return ret;
+        
+        //verify read
+        local_irq_save(flags);
+        sg_copy_to_buffer(&sg, 1, test->scratch, 512);
+        local_irq_restore(flags);
+
+        printk(KERN_ALERT "%s", (char *)test->scratch);
+    
+        //cleanup
+	//size = PAGE_SIZE * 2;
+	//size = min(size, test->card->host->max_req_size);
+	//size = min(size, test->card->host->max_seg_size);
+	//size = min(size, test->card->host->max_blk_count * 512);
+
+        //printk(KERN_ALERT "max_req_size is %lu\n", test->card->host->max_req_size);
+        //printk(KERN_ALERT "max_seg_size is %lu\n", test->card->host->max_seg_size);
+        //printk(KERN_ALERT "max_blk_count is %lu\n", test->card->host->max_blk_count);
+        //printk(KERN_ALERT "transfer size is %lu\n", size);
+
+        // release host
+out:
+	mmc_release_host(test->card->host);
+
+	pr_info("%s: Tests completed.\n",
+		mmc_hostname(test->card->host));
+}
+
 static void mmc_test_run(struct mmc_test_card *test, int testcase)
 {
 	int i, ret;
@@ -2843,6 +2923,58 @@ static int mtf_test_open(struct inode *inode, struct file *file)
 	return single_open(file, mtf_test_show, inode->i_private);
 }
 
+static ssize_t reliable_write_test(struct file *file, const char __user *buf,
+	size_t count, loff_t *pos)
+{
+	struct seq_file *sf = (struct seq_file *)file->private_data;
+	struct mmc_card *card = (struct mmc_card *)sf->private;
+	struct mmc_test_card *test;
+	long testcase;
+	int ret;
+
+	ret = kstrtol_from_user(buf, count, 10, &testcase);
+        printk(KERN_ALERT "testcase is %d\n", testcase);
+	if (ret)
+		return ret;
+
+	test = kzalloc(sizeof(struct mmc_test_card), GFP_KERNEL);
+	if (!test)
+		return -ENOMEM;
+
+	/*
+	 * Remove all test cases associated with given card. Thus we have only
+	 * actual data of the last run.
+	 */
+	mmc_test_free_result(card);
+
+	test->card = card;
+
+	test->buffer = kzalloc(BUFFER_SIZE, GFP_KERNEL);
+#ifdef CONFIG_HIGHMEM
+	test->highmem = alloc_pages(GFP_KERNEL | __GFP_HIGHMEM, BUFFER_ORDER);
+#endif
+
+#ifdef CONFIG_HIGHMEM
+	if (test->buffer && test->highmem) {
+#else
+	if (test->buffer) {
+#endif
+		mutex_lock(&mmc_test_lock);
+            printk(KERN_ALERT "reliable write start here!\n");
+                mmc_normal_write(test);
+		mutex_unlock(&mmc_test_lock);
+	}
+
+#ifdef CONFIG_HIGHMEM
+	__free_pages(test->highmem, BUFFER_ORDER);
+#endif
+	kfree(test->buffer);
+	kfree(test);
+
+            printk(KERN_ALERT "reliable write end here!\n");
+        return count;
+}
+
 static ssize_t mtf_test_write(struct file *file, const char __user *buf,
 	size_t count, loff_t *pos)
 {
@@ -2895,7 +3027,7 @@ static ssize_t mtf_test_write(struct file *file, const char __user *buf,
 static const struct file_operations mmc_test_fops_test = {
 	.open		= mtf_test_open,
 	.read		= seq_read,
-	.write		= mtf_test_write,
+	.write		= reliable_write_test,
 	.llseek		= seq_lseek,
 	.release	= single_release,
 };
@@ -2949,29 +3081,19 @@ static int __mmc_test_register_dbgfs_file(struct mmc_card *card,
 	struct dentry *file = NULL;
 	struct mmc_test_dbgfs_file *df;
 
-	printk(KERN_ALERT "root name is aaaaa\n");
-	printk(KERN_ALERT "root is %lx\n", card->debugfs_root); 
-	//card->debugfs_root = 1;
 	if (card->debugfs_root) {
-		printk(KERN_ALERT "DEBUGDEBUG: Passed %s %d \n",__FUNCTION__,__LINE__);
-		printk(KERN_ALERT "card is %lx\n", card); 
-		//card->debugfs_root = 0;
 		file = debugfs_create_file(name, mode, card->debugfs_root,
 			card, fops);
 	}
 
 	if (IS_ERR_OR_NULL(file)) {
-		printk(KERN_ALERT "debugfs fail!\n");
 		dev_err(&card->dev,
 			"Can't create %s. Perhaps debugfs is disabled.\n",
 			name);
 		return -ENODEV;
 	}
-		printk(KERN_ALERT "DEBUGDEBUG: BEFORE Passed %s %d \n",__FUNCTION__,__LINE__);
 	df = kmalloc(sizeof(struct mmc_test_dbgfs_file), GFP_KERNEL);
-		printk(KERN_ALERT "DEBUGDEBUG: AFTER Passed %s %d \n",__FUNCTION__,__LINE__);
 	if (!df) {
-		printk(KERN_ALERT "DEBUGDEBUG: Passed %s %d \n",__FUNCTION__,__LINE__);
 		debugfs_remove(file);
 		dev_err(&card->dev,
 			"Can't allocate memory for internal usage.\n");
@@ -3011,7 +3133,6 @@ static int mmc_test_probe(struct mmc_card *card)
 {
 	int ret;
 
-	printk(KERN_INFO "mmc_test_probe called\n");
 	if (!mmc_card_mmc(card) && !mmc_card_sd(card))
 		return -ENODEV;
 
